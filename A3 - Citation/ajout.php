@@ -9,13 +9,19 @@
 			<article>
 				<header><h1>Formulaire de création de citations</h1></header>
 								<?php
-								// Load bootstrap to provide a datalist of existing authors
-								require_once __DIR__ . '/bootstrap.php';
-								$data = main();
-								$existingAuthors = $data['authors'];
+								// Load existing authors from database
+								require_once __DIR__ . '/config/db-functions.php';
+								require_once __DIR__ . '/Entity/Author.php';
+								use Entity\Author;
+								$rawAuthors = db_get_authors();
+								$existingAuthors = [];
+								foreach ($rawAuthors as $row) {
+									$annee = $row['birthDate'] ? (int)date('Y', strtotime($row['birthDate'])) : null;
+									$existingAuthors[] = new Author((int)$row['idAuteur'], $row['firstName'], $row['lastName'], $annee);
+								}
 								?>
 
-								<form method="post" name="FrameCitation" action="ajoutCtrl.php">
+				<form method="post" name="FrameCitation" action="ajoutCtrl.php">
 				  <table border="1" bgcolor="#ccccff" frame="above">
 					<tbody>
 						<tr>

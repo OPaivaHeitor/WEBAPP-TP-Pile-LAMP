@@ -1,21 +1,21 @@
 <?php
 declare(strict_types=1);
 
-// controller that builds Entity instances and shows form / results
-// No output must happen before declare(strict_types=1)
-
 require_once __DIR__ . '/bootstrap.php';
+require_once __DIR__ . '/config/db-functions.php';
 require_once __DIR__ . '/Entity/Author.php';
 require_once __DIR__ . '/Entity/Citation.php';
 
 use Entity\Author;
 use Entity\Citation;
 
-$erreur = [];
-$data = main();
-$authors = $data['authors'];
-$nextCitationId = $data['nextCitationId'] ?? 1;
-$nextAuthorId = $data['nextAuthorId'] ?? (count($authors) + 1);
+// Load authors from database
+$rawAuthors = db_get_authors();
+$authors = [];
+foreach ($rawAuthors as $row) {
+    $annee = $row['birthDate'] ? (int)date('Y', strtotime($row['birthDate'])) : null;
+    $authors[] = new Author((int)$row['idAuteur'], $row['firstName'], $row['lastName'], $annee);
+}
 
 // helpers
 function findAuthor(array $authors, string $input): ?Author
@@ -76,35 +76,56 @@ if (isset($_POST['login']) && $_SERVER['REQUEST_METHOD'] === 'POST') {
 			$prenom = trim($_POST['prenom'] ?? '');
 			$nom = trim($_POST['nom'] ?? '');
 			$annee = isset($_POST['annee']) && $_POST['annee'] !== '' ? (int)$_POST['annee'] : null;
-			if ($prenom !== '' && $nom !== '') {
-				$found = new Author(null, $prenom, $nom, $annee);
-			} else {
-				// fallback: create a generic author from the raw input
-				$found = new Author(null, $auteurInput ?: 'Inconnu', '');
+
+			try {
+				if ($prenom !== '' && $nom !== '') {
+					$found = new Author(null, $prenom, $nom, $annee);
+				} elseif ($auteurInput !== '') {
+					// try to split the single input into prenom and nom
+					$parts = preg_split('/\s+/', $auteurInput, 2, PREG_SPLIT_NO_EMPTY);
+					if (count($parts) === 2) {
+						$found = new Author(null, $parts[0], $parts[1], $annee);
+					} else {
+						// single token provided: use it as prenom and fallback nom to 'Inconnu'
+						$found = new Author(null, $parts[0], 'Inconnu', $annee);
+					}
+				} else {
+					// no author info provided: create a generic placeholder author
+					$found = new Author(null, 'Inconnu', 'Inconnu', null);
+				}
+			} catch (\InvalidArgumentException $ex) {
+				// convert constructor errors to validation errors
+				$erreur['auteur'] = $ex->getMessage();
+				// stop processing further
+				$found = null;
 			}
 		}
 
-		// ensure created authors get an id and are registered
+		// ensure created authors get an id and are inserted into DB
 		if ($found->getId() === null) {
+			$birthDate = $found->getAnneeNaissance() ? $found->getAnneeNaissance() . '-01-01' : null;
+			$idAuteur = db_insert_author($found->getPrenom(), $found->getNom(), $birthDate);
 			$reflection = new ReflectionClass($found);
-			// set id property via reflection (since it's private)
 			$prop = $reflection->getProperty('id');
 			$prop->setAccessible(true);
-			$prop->setValue($found, $nextAuthorId);
-			$nextAuthorId++;
+			$prop->setValue($found, $idAuteur);
 			$authors[] = $found;
+		} else {
+			$idAuteur = $found->getId();
 		}
 
-		// create citation
-		$citation = new Citation($nextCitationId, $texte, $d);
-		$nextCitationId++;
-		$citation->setAuteur($found);
+		// insert citation into DB
+		$dateCitation = $d->format('Y-m-d');
+		db_insert_citation($login, $texte, $dateCitation, $idAuteur);
 
-		// After successful addition, show all authors and citations
-		// We'll render the view below by setting $showAll = true
-		$showAll = true;
+		// Success message
+		$success = "Citation ajoutée avec succès.";
+
+		// Reset form
+		$login = $texte = $auteurInput = $dateInput = '';
 	}
-} else {
+	}
+else {
 	$login = $texte = $auteurInput = $dateInput = '';
 }
 
@@ -124,6 +145,7 @@ $date = $dateInput;
 		<main>
 			<article>
 				<header><h1>Formulaire de création de citations</h1></header>
+				<?php if (!empty($success)) echo "<p style='color:green;'>$success</p>"; ?>
 				<form method="post" name="FrameCitation" action="<?php echo $_SERVER['PHP_SELF'];?>">
 				  <table border="0" bgcolor="#ccccff" frame="above">
 					<tbody>
@@ -154,14 +176,40 @@ $date = $dateInput;
 				  </table>
 				</form>
 			</article>
+
+				<?php if (!empty($showAll) && $showAll): ?>
+					<section>
+						<h2>Liste des auteurs et de leurs citations</h2>
+						<?php if (empty($authors)): ?>
+							<p>Aucun auteur enregistré.</p>
+						<?php else: ?>
+							<?php foreach ($authors as $author): ?>
+								<article>
+									<header>
+										<h3><?= htmlspecialchars($author->getPrenom() . ' ' . $author->getNom(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?> <?php if ($author->getAnneeNaissance()) echo '('.htmlspecialchars((string)$author->getAnneeNaissance(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8').')'; ?></h3>
+									</header>
+									<?php $cits = $author->getCitations(); if (empty($cits)): ?>
+										<p><em>Aucune citation</em></p>
+									<?php else: ?>
+										<?php foreach ($cits as $cit): ?>
+											<blockquote><?= nl2br(htmlspecialchars($cit->getTexte(), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8')) ?>
+												<div style="font-size:.9em;color:#666">Le <?= htmlspecialchars($cit->getDateAjout()->format('Y-m-d'), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></div>
+											</blockquote>
+										<?php endforeach; ?>
+									<?php endif; ?>
+								</article>
+							<?php endforeach; ?>
+						<?php endif; ?>
+					</section>
+				<?php endif; ?>
 		</main>
  		<script>
-		function convertToISO(timebit) {
-	timebit.setHours(0, -timebit.getTimezoneOffset(), 0, 0);
-	// remove GMT offset
-	var isodate = timebit.toISOString().slice(0,10);
-	// format convert and take first 10 characters of result
-	return isodate;
+function convertToISO(timebit) {
+		timebit.setHours(0, -timebit.getTimezoneOffset(), 0, 0);
+		// remove GMT offset
+		var isodate = timebit.toISOString().slice(0,10);
+		// format convert and take first 10 characters of result
+		return isodate;
 	}
 		document.getElementById('datePicker').value = convertToISO(new Date());</script>
  </body>
